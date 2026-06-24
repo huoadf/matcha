@@ -1,0 +1,219 @@
+-- [ASMR] Keyboard Incremental Auto-TP Script with WabiSabi UI
+-- Uses the Matcha-native WabiSabi UI Library.
+-- Teleports only to KeyModels within the selected Area folder.
+-- High-speed sequential loop optimized with caching and instant transparency-based active checks.
+
+loadstring(game:HttpGet("https://scripts.wabisabi.mom/wabi-sabi-ui-lib.lua"))()
+local Library = WabiSabi
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Caching variables to prevent lag
+local cachedKeys = {}
+local lastCacheTime = 0
+local cacheDuration = 3 -- Rebuild key list cache every 3 seconds
+local currentArea = nil
+
+-- Helper function to find all active area folder names in workspace
+local function getAreaNames()
+    local areas = {}
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, child in ipairs(map:GetChildren()) do
+            -- Look for folders starting with "Area" or containing "KeySpawner"
+            if child:IsA("Folder") and (child:FindFirstChild("KeySpawner") or string.find(child.Name, "Area")) then
+                table.insert(areas, child.Name)
+            end
+        end
+    end
+    
+    if #areas == 0 then
+        areas = { "Area1" }
+    else
+        -- Sort areas numerically (so Area2 comes before Area10)
+        table.sort(areas, function(a, b)
+            local numA = tonumber(string.match(a, "%d+"))
+            local numB = tonumber(string.match(b, "%d+"))
+            if numA and numB then
+                return numA < numB
+            end
+            return a < b
+        end)
+    end
+    return areas
+end
+
+-- Initialize the area list for the dropdown
+local initialAreas = getAreaNames()
+
+-- Create the Window
+local Window = Library:CreateWindow({
+    Title = "Keyboard Incremental",
+    Size = Vector2.new(460, 380),
+    Resize = true,
+})
+
+-- Add the main farming tab
+local MainTab = Window:AddTab({ Title = "Farming", Icon = "house" })
+
+-- Add UI configuration elements
+local tpToggle = MainTab:AddToggle({
+    Id = "tp_toggle",
+    Title = "Auto Teleport",
+    Description = "Start/stop teleporting to keycaps.",
+    Default = false
+})
+
+local delaySlider = MainTab:AddSlider({
+    Id = "tp_delay",
+    Title = "Teleport Delay",
+    Description = "Set to 0 for maximum speed (1-frame delay).",
+    Min = 0.00,
+    Max = 1.00,
+    Default = 0.05,
+    Rounding = 2
+})
+
+local heightSlider = MainTab:AddSlider({
+    Id = "tp_height",
+    Title = "Height Offset",
+    Description = "Height above keycaps to teleport. Helps register touch.",
+    Min = 0.0,
+    Max = 10.0,
+    Default = 2.5,
+    Rounding = 1
+})
+
+-- Add the Dropdown to select the active area to farm
+local areaDropdown = MainTab:AddDropdown({
+    Id = "active_area",
+    Title = "Active Area",
+    Description = "Select the specific area you want to farm.",
+    Values = initialAreas,
+    Default = initialAreas[1] or "Area1"
+})
+
+-- Add a button to refresh the area list dynamically
+local function refreshAreas(silent)
+    local updatedAreas = getAreaNames()
+    if #updatedAreas > 0 then
+        areaDropdown:SetValues(updatedAreas)
+        if not silent then
+            Library:Notify({ Title = "Areas Refreshed", Content = "Found " .. #updatedAreas .. " areas.", Duration = 3 })
+        end
+    end
+end
+
+MainTab:AddButton({
+    Title = "Refresh Area List",
+    Description = "Updates the area list if you unlocked new ones.",
+    Callback = function()
+        refreshAreas(false)
+    end
+})
+
+-- Automatic Listener: Detect when a new Area folder is unlocked (with Matcha nil guard)
+local map = workspace:FindFirstChild("Map")
+if map and map.ChildAdded then
+    map.ChildAdded:Connect(function(child)
+        if child:IsA("Folder") and (child:FindFirstChild("KeySpawner") or string.find(child.Name, "Area")) then
+            task.wait(1) -- Wait for folder contents to load
+            refreshAreas(true)
+            Library:Notify({ 
+                Title = "New Area Unlocked", 
+                Content = child.Name .. " has been added to your dropdown.", 
+                Duration = 5 
+            })
+        end
+    end)
+end
+
+-- Helper function to find the character's HumanoidRootPart
+local function getRootPart()
+    local character = LocalPlayer.Character
+    if character then
+        return character:FindFirstChild("HumanoidRootPart")
+    end
+    return nil
+end
+
+-- Helper function to find KeyModels inside the selected Area folder (Uncached)
+local function getKeycaps(selectedArea)
+    local keys = {}
+    local map = workspace:FindFirstChild("Map")
+    if map and selectedArea then
+        local areaFolder = map:FindFirstChild(selectedArea)
+        if areaFolder then
+            -- Find all parts named "KeyModel" inside the selected area folder
+            for _, descendant in ipairs(areaFolder:GetDescendants()) do
+                if descendant.Name == "KeyModel" and descendant:IsA("BasePart") then
+                    table.insert(keys, descendant)
+                end
+            end
+        end
+    end
+    return keys
+end
+
+-- Retrieve keycaps from cache to prevent heavy GetDescendants() calls every frame
+local function getCachedKeycaps(selectedArea)
+    local now = tick()
+    if selectedArea ~= currentArea or #cachedKeys == 0 or (now - lastCacheTime) > cacheDuration then
+        currentArea = selectedArea
+        cachedKeys = getKeycaps(selectedArea)
+        lastCacheTime = now
+    end
+    return cachedKeys
+end
+
+-- Main Farming Loop
+task.spawn(function()
+    print("[Auto-TP] Farming thread initialized.")
+    
+    while not Library.Unloaded do
+        if tpToggle.Value then
+            local rootPart = getRootPart()
+            local selectedArea = areaDropdown.Value
+            
+            if rootPart and selectedArea then
+                -- Rebuild key list from cache (extremely fast)
+                local keys = getCachedKeycaps(selectedArea)
+                if #keys > 0 then
+                    for _, key in ipairs(keys) do
+                        -- Break immediately if toggled off or area changed mid-loop
+                        if not tpToggle.Value or Library.Unloaded or selectedArea ~= areaDropdown.Value then break end
+                        
+                        if key and key.Parent then
+                            -- Blazing-fast active check: reading Transparency directly has 0 CPU overhead.
+                            -- Popped keycaps become transparent, so we skip them instantly.
+                            if key.Transparency < 0.5 then
+                                local offset = heightSlider.Value or 2.5
+                                rootPart.CFrame = key.CFrame + Vector3.new(0, offset, 0)
+                                
+                                -- Speed Optimization
+                                local delayVal = delaySlider.Value or 0.05
+                                if delayVal <= 0 then
+                                    task.wait() -- Waits exactly 1 physics frame (~0.016s)
+                                else
+                                    task.wait(delayVal)
+                                end
+                            end
+                        end
+                    end
+                else
+                    task.wait(0.2)
+                end
+            else
+                task.wait(0.5)
+            end
+        else
+            task.wait(0.1)
+        end
+    end
+    
+    print("[Auto-TP] Farming thread stopped due to UI unload.")
+end)
+
+-- Notify the user that the UI has successfully loaded
+Library:Notify({ Title = "Matcha UI Loaded", Content = "ASMR Keyboard Incremental script is ready.", Duration = 4 })
